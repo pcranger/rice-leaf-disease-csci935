@@ -2,6 +2,28 @@
 
 This project implements deep learning models for rice leaf disease classification using computer vision techniques.
 
+
+
+## Prerequisites
+
+Make sure you have the `Dhan-Shomadhan` folder in the project root directory. This folder should contain the original rice leaf disease dataset with the following structure:
+
+```
+Dhan-Shomadhan/
+├── Field Background/
+│   ├── Brown Spot/
+│   ├── Leaf Scald/
+│   ├── Rice Blast/
+│   ├── Rice Tungro/
+│   └── Sheath Blight/
+└── White Background/
+    ├── Brown Spot/
+    ├── Leaf Scald/
+    ├── Rice Blast/
+    ├── Rice Tungro/
+    └── Sheath Blight/
+```
+
 ## Installation
 
 Install the required libraries using pip:

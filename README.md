@@ -39,7 +39,7 @@ pip install -r requirements.txt
 Use this to quickly test CLAHE, mask, crop operations before processing the entire dataset:
 
 ```bash
-python preprocess_offline.py --in_dir "./Dhan-Shomadhan" --out_dir "./preprocessed_mixed_preview" --mask --mask_mode robust --clahe --resize 224 --bg white --preview 5
+python preprocess_offline.py --preview 5 --mask --mask_mode robust --clahe --resize 224 --bg white
 ```
 
 ### 2. Full Dataset Processing
@@ -47,10 +47,18 @@ python preprocess_offline.py --in_dir "./Dhan-Shomadhan" --out_dir "./preprocess
 After testing, remove the `--preview` flag to process all images:
 
 ```bash
-python preprocess_offline.py --in_dir "./Dhan-Shomadhan" --out_dir "./preprocessed" --mask --mask_mode robust --clahe --resize 224 --bg white
+python preprocess_offline.py --mask --mask_mode robust --clahe --resize 224 --bg white
 ```
 
-### 3. Training
+### 3. Custom Output Directory (Optional)
+
+If you want to specify a custom output directory under the main dataset folder:
+
+```bash
+python preprocess_offline.py --out_dir "custom_processed" --mask --mask_mode robust --clahe --resize 224 --bg white
+```
+
+### 4. Training
 
 After preprocessing is complete, start training by running:
 
@@ -63,7 +71,7 @@ python run_experiments.py
 You can modify which models are being trained by editing the `MODELS` variable in `compare.py`:
 
 ```python
-MODELS = ['efficientnetb0','mobilenetv2']  # Add or remove models as needed
+MODELS = ['resnet50','efficientnetb0','mobilenetv2']  # Add or remove models as needed
 ```
 
 ## Project Structure

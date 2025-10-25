@@ -9,7 +9,9 @@ from models import build_model
 from train import train_then_eval_multi
 
 TEST_SCENARIOS = ['white','field','mixed']
-MODELS = ['resnet50','efficientnetb0','mobilenetv2']
+# MODELS = ['resnet50','efficientnetb0','mobilenetv2']
+MODELS = ['resnet50']
+
 
 
 def run_suite_cross(cfg: Config):

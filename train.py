@@ -56,6 +56,10 @@ def train_then_eval_multi(model, train_loader, val_loader,
     best_path = out_dir / f"{run_name}_best.pt"
     history = {"train_loss": [], "val_loss": [], "val_f1": []}
 
+    # Early stopping variables
+    patience = 3  # Number of epochs to wait for improvement
+    no_improve_epochs = 0
+
     for epoch in range(cfg.epochs):
         model.train()
         running = 0.0
@@ -79,10 +83,18 @@ def train_then_eval_multi(model, train_loader, val_loader,
 
         if macro_f1 > best_f1:
             best_f1 = macro_f1
+            no_improve_epochs = 0  # Reset counter
             out_dir.mkdir(parents=True, exist_ok=True)
             # ✅ Only compute report/CM once when saving best
             cm, report, _ = evaluate_on_loader(model, val_loader, dev, zero_division=0)
             torch.save({"state_dict": model.state_dict(), "report": report}, best_path)
+        else:
+            no_improve_epochs += 1
+
+        # Check for early stopping
+        if no_improve_epochs >= patience:
+            print(f"Early stopping triggered after {epoch+1} epochs.")
+            break
 
         scheduler.step()
 

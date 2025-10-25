@@ -2,7 +2,10 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
+
 NUM_CLASSES = 5
+DEFAULT_DROP_RATE = 0.2
+DEFAULT_FINETUNE_MODE = 'full_ft'  # 'linear_probe' | 'partial_ft' | 'full_ft'
 
 
 def build_model(name: str='resnet50', finetune_mode: str='full_ft', drop_rate: float=0.2):

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Offline preprocessing for Dhan-Shomadhan:
-- Robust HSV/LAB mask to keep leaf (green + yellow lesions), with morphology & largest CC
+Offline preprocessing for Dhan-Shomadhan (Improved Version):
+- Advanced HSV/LAB mask to keep leaf (green + yellow lesions + brown/tan lesions + white/gray scald)
 - Apply CLAHE only INSIDE the leaf mask (optional)
 - Optional resize
 - Save to new root, preserving background & class folders
 
-Optional: create stratified splits with fixed seed.
+This version uses improved masking ranges based on practical rice leaf disease analysis.
 """
 
 import argparse
@@ -20,6 +20,9 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import shutil
 
+# =============================================================================
+# IMPORTANT VARIABLES - MODIFY THESE TO CHANGE PREPROCESSING CONFIGURATION
+# =============================================================================
 CLASS_NAMES = ['Brown Spot','Leaf Scald','Rice Blast','Rice Tungro','Sheath Blight']
 CLASS_FIX = {
     'Leaf Scaled': 'Leaf Scald',
@@ -34,8 +37,8 @@ BG_DIRS = ['White Background', 'Field Background']
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--in_dir', type=str, required=True, help='Original dataset root (Dhan-Shomadhan)')
-    ap.add_argument('--out_dir', type=str, required=True, help='Processed dataset root')
+    ap.add_argument('--in_dir', type=str, default='./Dhan-Shomadhan', help='Original dataset root (Dhan-Shomadhan)')
+    ap.add_argument('--out_dir', type=str, help='Processed dataset root (will be created under in_dir if not specified)')
 
     ap.add_argument('--mask', action='store_true', help='Apply background removal')
     ap.add_argument('--mask_mode', choices=['robust','green'], default='robust',
@@ -64,13 +67,13 @@ def parse_args():
     ap.add_argument('--roi_pad', type=float, default=0.05,
                 help='Padding ratio (0.0–0.3) added around the leaf bbox.')
 
-
     return ap.parse_args()
 
 # -------------------- Utils --------------------
 
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
+
 def list_images(root: Path) -> List[Tuple[str, str, str]]:
     """
     Return list of (bg, cls, path) for all images.
@@ -121,53 +124,167 @@ def list_images(root: Path) -> List[Tuple[str, str, str]]:
     print(f"[WARN] '{root}' does not look like a dataset root or a background folder.")
     return items
 
-
-# -------------------- Masking --------------------
+# -------------------- Improved Masking --------------------
 
 def mask_green_only(rgb: np.ndarray) -> np.ndarray:
+    """Simple green mask for basic cases."""
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
     g1 = np.array([25, 30, 30]); g2 = np.array([95, 255, 255])
     return cv2.inRange(hsv, g1, g2)
 
-def mask_robust_leaf_keep_lesions(rgb: np.ndarray) -> np.ndarray:
-    """Keep green + yellow lesions + LAB-a support; fix holes & keep largest CC."""
+def get_leaf_roi(rgb: np.ndarray, is_white_bg: bool = False) -> np.ndarray:
+    """
+    Step 1: Get coarse foreground (leaf) ROI
+    """
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    H, S, V = cv2.split(hsv)
+    
+    if is_white_bg:
+        # White background images: foreground = S > 10 OR V < 240
+        foreground = (S > 10) | (V < 240)
+        foreground = foreground.astype(np.uint8) * 255
+        
+        # Keep largest contour
+        contours_info = cv2.findContours(foreground, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = contours_info[0] if len(contours_info) == 2 else contours_info[1]
+        if cnts:
+            biggest = max(cnts, key=cv2.contourArea)
+            leaf_roi = np.zeros_like(foreground)
+            cv2.drawContours(leaf_roi, [biggest], -1, 255, thickness=cv2.FILLED)
+            return leaf_roi
+        return foreground
+    else:
+        # Field images: green leaf pre-mask
+        green_mask = (H >= 30) & (H <= 85) & (S > 40) & (V > 40)
+        green_mask = green_mask.astype(np.uint8) * 255
+        
+        # Morphological operations
+        kernel = np.ones((5, 7), np.uint8)
+        green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel)
+        
+        # Keep connected components with elongated shape (leaf blades)
+        contours_info = cv2.findContours(green_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = contours_info[0] if len(contours_info) == 2 else contours_info[1]
+        
+        if cnts:
+            # Filter by aspect ratio (leaf blades are elongated)
+            valid_contours = []
+            for cnt in cnts:
+                if cv2.contourArea(cnt) > 100:  # Minimum area
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    aspect_ratio = max(w, h) / max(min(w, h), 1)
+                    if aspect_ratio > 1.5:  # Elongated shape
+                        valid_contours.append(cnt)
+            
+            if valid_contours:
+                # Combine valid contours
+                leaf_roi = np.zeros_like(green_mask)
+                cv2.drawContours(leaf_roi, valid_contours, -1, 255, thickness=cv2.FILLED)
+                
+                # Add LAB-a support for dull greens
+                lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+                a = lab[:, :, 1]
+                lab_mask = (a < 125).astype(np.uint8) * 255
+                leaf_roi = cv2.bitwise_or(leaf_roi, lab_mask)
+                
+                return leaf_roi
+        
+        return green_mask
 
-    # green (wider) + yellow to keep lesions
-    # g1 = np.array([20, 25, 25]); g2 = np.array([100, 255, 255])
-    # y1 = np.array([8,  20, 25]); y2 = np.array([40,  255, 255])
-    # trong mask_robust_leaf_keep_lesions
-    g1 = np.array([20, 60, 25]); g2 = np.array([100, 255, 255])  
-    y1 = np.array([10, 60, 25]); y2 = np.array([40,  255, 255])  
+def get_disease_masks(rgb: np.ndarray, leaf_roi: np.ndarray) -> np.ndarray:
+    """
+    Step 2: Get disease masks (within leaf ROI only)
+    """
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    H, S, V = cv2.split(hsv)
+    
+    # A. Leaf tissue (healthy green to light chlorosis)
+    leaf_green = (H >= 35) & (H <= 82) & (S >= 60) & (V >= 60)
+    leaf_yellow = (H >= 18) & (H <= 45) & (S >= 60) & (V >= 90)  # Tungro yellowing
+    leaf_mask = (leaf_green | leaf_yellow).astype(np.uint8) * 255
+    
+    # B. Brown/tan lesions (two windows for reds/browns)
+    brown1 = (H >= 0) & (H <= 10) & (S >= 50) & (V >= 50) & (V <= 220)
+    brown2 = (H >= 10) & (H <= 30) & (S >= 50) & (V >= 50) & (V <= 220)
+    brown_mask = (brown1 | brown2).astype(np.uint8) * 255
+    
+    # C. White/gray scald (apply only inside leaf ROI)
+    white_lesion = ((S <= 40) & (V >= 160)).astype(np.uint8) * 255
+    
+    # Restrict to leaf ROI
+    lesions = cv2.bitwise_and(cv2.bitwise_or(brown_mask, white_lesion), leaf_roi)
+    
+    # Final mask = leaf + lesions
+    final_mask = cv2.bitwise_or(leaf_mask, lesions)
+    
+    # Additional cleanup: ensure lesions are connected to leaf tissue
+    # Dilate leaf ROI slightly to include nearby lesions
+    kernel = np.ones((5, 5), np.uint8)
+    dilated_roi = cv2.dilate(leaf_roi, kernel, iterations=1)
+    lesions = cv2.bitwise_and(lesions, dilated_roi)
+    
+    final_mask = cv2.bitwise_or(leaf_mask, lesions)
+    
+    return final_mask
 
-    mask_g = cv2.inRange(hsv, g1, g2)
-    mask_y = cv2.inRange(hsv, y1, y2)
-    mask = cv2.bitwise_or(mask_g, mask_y)
-
-    # LAB-a low (greenish)
-    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
-    a = lab[:, :, 1]
-    # mask_lab = cv2.inRange(a, 0, 150)
-    mask_lab = cv2.inRange(a, 0, 135)
-    mask = cv2.bitwise_or(mask, mask_lab)
-
-    # morphology: close -> open
-    k = np.ones((5,5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  k, iterations=1)
-
-    # keep largest component
-    contours_info = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+def mask_robust_leaf_keep_lesions_v2(rgb: np.ndarray) -> np.ndarray:
+    """
+    Improved robust masking using the new approach.
+    """
+    # Determine if this is a white background image
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    S, V = hsv[:, :, 1], hsv[:, :, 2]
+    is_white_bg = np.mean(V) > 200 and np.mean(S) < 50
+    
+    # Step 1: Get leaf ROI
+    leaf_roi = get_leaf_roi(rgb, is_white_bg)
+    
+    # Step 2: Get disease masks within leaf ROI
+    disease_mask = get_disease_masks(rgb, leaf_roi)
+    
+    # Step 3: Union & cleanup
+    final_mask = cv2.bitwise_or(leaf_roi, disease_mask)
+    
+    # Morphology: open(3) then close(5)
+    kernel_open = np.ones((3, 3), np.uint8)
+    kernel_close = np.ones((5, 5), np.uint8)
+    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel_open)
+    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, kernel_close)
+    
+    # Fill holes on long, thin components
+    contours_info = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = contours_info[0] if len(contours_info) == 2 else contours_info[1]
+    
+    if cnts:
+        filled_mask = np.zeros_like(final_mask)
+        for cnt in cnts:
+            if cv2.contourArea(cnt) > 50:  # Minimum area
+                # Check if it's a long, thin component (sheath-blight/leaf-scald streaks)
+                x, y, w, h = cv2.boundingRect(cnt)
+                aspect_ratio = max(w, h) / max(min(w, h), 1)
+                if aspect_ratio > 6 and min(w, h) >= 3 and min(w, h) <= 20:
+                    # Fill holes for long, thin components
+                    cv2.drawContours(filled_mask, [cnt], -1, 255, thickness=cv2.FILLED)
+                else:
+                    cv2.drawContours(filled_mask, [cnt], -1, 255, thickness=cv2.FILLED)
+        final_mask = filled_mask
+    
+    # Keep largest component as failsafe
+    contours_info = cv2.findContours(final_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cnts = contours_info[0] if len(contours_info) == 2 else contours_info[1]
     if cnts:
         biggest = max(cnts, key=cv2.contourArea)
-        mask2 = np.zeros_like(mask)
+        mask2 = np.zeros_like(final_mask)
         cv2.drawContours(mask2, [biggest], -1, 255, thickness=cv2.FILLED)
-        mask = mask2
-    return mask
+        final_mask = mask2
+    
+    return final_mask
 
 def build_mask(rgb: np.ndarray, mode: str) -> np.ndarray:
-    return mask_robust_leaf_keep_lesions(rgb) if mode == 'robust' else mask_green_only(rgb)
+    if mode == 'robust':
+        return mask_robust_leaf_keep_lesions_v2(rgb)
+    else:
+        return mask_green_only(rgb)
 
 # -------------------- CLAHE (inside mask) --------------------
 
@@ -198,6 +315,15 @@ def preprocess_one(in_path: str, out_path: str, args) -> Tuple[bool, str]:
         if area < args.min_leaf_area_ratio * (H * W):
             mask = None
         if mask is not None:
+            # Apply mask: keep leaf + lesions, replace background
+            out_rgb = rgb.copy()
+            out_rgb[mask == 0] = [bg_val, bg_val, bg_val]
+            
+            # Apply CLAHE only inside mask if requested
+            if args.clahe:
+                clahe_rgb = apply_clahe_rgb(rgb)
+                out_rgb[mask > 0] = clahe_rgb[mask > 0]
+            
             # ====== NEW: crop ROI quanh bbox lớn nhất của mask ======
             if getattr(args, 'crop_roi', False):
                 ys, xs = np.where(mask > 0)
@@ -210,12 +336,7 @@ def preprocess_one(in_path: str, out_path: str, args) -> Tuple[bool, str]:
                     y0 = max(0, y0 - pad); y1 = min(mask.shape[0], y1 + pad)
                     x0 = max(0, x0 - pad); x1 = min(mask.shape[1], x1 + pad)
                     # crop cả ảnh và mask
-                    rgb_crop  = rgb[y0:y1, x0:x1]
-                    mask_crop = mask[y0:y1, x0:x1]
-                else:
-                    rgb_crop, mask_crop = rgb, mask
-            else:
-                rgb_crop, mask_crop = rgb, mask
+                    out_rgb = out_rgb[y0:y1, x0:x1]
         elif args.clahe:
             out_rgb = apply_clahe_rgb(rgb)
     elif args.clahe:
@@ -275,25 +396,27 @@ def stratified_splits(pre_root: Path, out_root: Path, val_ratio: float, test_rat
         if bg in by_bg:
             by_bg[bg].append((bg, cls, p))
 
-    def split_one_domain(domain_items: List[Tuple[str,str,str]]):
-        by_cls: Dict[str, List[Tuple[str,str,str]]] = {c: [] for c in CLASS_NAMES}
+    def split_one_domain(domain_items: List[Tuple[str, str, str]]):
+        by_cls: Dict[str, List[Tuple[str, str, str]]] = {c: [] for c in CLASS_NAMES}
         for bg, cls, p in domain_items:
             by_cls[cls].append((bg, cls, p))
         train, val, test = [], [], []
         for cls in CLASS_NAMES:
             arr = by_cls[cls]
-            if not arr: continue
+            if not arr:
+                continue
             idx = np.arange(len(arr))
             rng.shuffle(idx)
             n = len(idx)
-            n_test = int(round(n * test_ratio))
-            n_val  = int(round((n - n_test) * val_ratio))
+            n_test = int(round(n * test_ratio))  # 10% for testing
+            n_val = int(round(n * val_ratio))  # 20% for validation
+            n_train = n - n_test - n_val  # Remaining 70% for training
             test_idx = idx[:n_test]
-            val_idx  = idx[n_test:n_test+n_val]
-            train_idx= idx[n_test+n_val:]
+            val_idx = idx[n_test:n_test + n_val]
+            train_idx = idx[n_test + n_val:]
             train += [arr[i] for i in train_idx]
-            val   += [arr[i] for i in val_idx]
-            test  += [arr[i] for i in test_idx]
+            val += [arr[i] for i in val_idx]
+            test += [arr[i] for i in test_idx]
         return train, val, test
 
     def materialize(split, split_name: str, bg_filter: str=None):
@@ -343,12 +466,15 @@ def stratified_splits(pre_root: Path, out_root: Path, val_ratio: float, test_rat
 def preview_samples(in_root: Path, args, num_preview: int = 5):
     import random, matplotlib.pyplot as plt
     from PIL import Image
+    import time
 
     items = list_images(in_root)
     if len(items) == 0:
         print("[preview] No images found.")
         return
-    random.seed(args.seed)
+    
+    # Use current time as seed for true randomness each time
+    random.seed(int(time.time() * 1000) % 2**32)
     samples = random.sample(items, min(num_preview, len(items)))
     print(f"[preview] Showing {len(samples)} random samples with current settings...")
 
@@ -368,8 +494,17 @@ def preview_samples(in_root: Path, args, num_preview: int = 5):
 
 def main():
     args = parse_args()
-    in_root  = Path(args.in_dir)
-    out_root = Path(args.out_dir)
+    in_root = Path(args.in_dir)
+    
+    # If out_dir is not specified, create it under the main dataset folder
+    if args.out_dir is None:
+        out_root = in_root / "preprocessed"
+    else:
+        out_root = Path(args.out_dir)
+        # Ensure out_dir is under the main dataset folder
+        if not str(out_root).startswith(str(in_root)):
+            out_root = in_root / args.out_dir
+    
     ensure_dir(out_root)
 
     if args.preview is not None:
@@ -384,7 +519,7 @@ def main():
     preprocess_all(in_root, out_root, args)
 
     if args.make_splits:
-        split_root = Path(str(out_root) + "_splits")
+        split_root = in_root / "preprocessed_splits"
         print(f"[SPLIT] Creating splits at: {split_root}")
         stratified_splits(out_root, split_root, args.val_ratio, args.test_ratio, args.seed, args.copy_mode)
 
